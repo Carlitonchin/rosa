@@ -1,26 +1,50 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { createPetalTextures, createLeafTextures, createStemTextures } from './textures.js';
 
-// Every botanical surface is geometry: the flower remains three-dimensional
-// when viewed from behind, above, or at very close range.
+// A hybrid-tea rose built from botany rather than from discs: every petal is a
+// midrib curve integrated from its base lean to its tip reflex, cupped across
+// its width, folded back at the corners and ruffled at the rim. Petals follow
+// the golden angle, so the spiral centre emerges by itself.
 const TAU = Math.PI * 2;
+const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
+const { lerp, clamp, smoothstep } = THREE.MathUtils;
+
 let seed = 419;
 function random() {
   seed = (seed * 1664525 + 1013904223) >>> 0;
   return seed / 4294967296;
 }
-const lerp = THREE.MathUtils.lerp;
+const jitter = amount => (random() * 2 - 1) * amount;
 
-function surfaceGeometry(sample, uSteps, vSteps, colorAt) {
-  const positions = [], uvs = [], colors = [], indices = [];
+// A slow breath for each blade, strongest at the tip; runs in the vertex shader.
+const SWAY_GLSL = `
+float petalSway(float phase, float t, float time) {
+  return (sin(time * 0.7 + phase * 6.2832) * 0.6
+    + sin(time * 1.9 + phase * 11.0) * 0.25
+    + sin(time * 0.23 + phase * 2.0) * 0.4) * t * t;
+}`;
+
+function surfaceGeometry(sample, uSteps, vSteps, vertexData, remapT = t => t) {
+  const count = (uSteps + 1) * (vSteps + 1);
+  const positions = new Float32Array(count * 3);
+  const uvs = new Float32Array(count * 2);
+  const colors = new Float32Array(count * 3);
+  const extras = new Float32Array(count * 2);
+  const indices = [];
+  const out = { color: new THREE.Color(), thickness: 1, phase: 0 };
+  let k = 0;
   for (let j = 0; j <= vSteps; j++) {
-    const v = j / vSteps;
-    for (let i = 0; i <= uSteps; i++) {
+    const t = remapT(j / vSteps);
+    for (let i = 0; i <= uSteps; i++, k++) {
       const u = i / uSteps;
-      const point = sample(u, v);
-      positions.push(point.x, point.y, point.z);
-      uvs.push(u, v);
-      if (colorAt) colors.push(...colorAt(u, v).toArray());
+      const x = u * 2 - 1;
+      const p = sample(x, t);
+      positions[k * 3] = p.x; positions[k * 3 + 1] = p.y; positions[k * 3 + 2] = p.z;
+      uvs[k * 2] = u; uvs[k * 2 + 1] = t;
+      vertexData(x, t, out, p);
+      colors[k * 3] = out.color.r; colors[k * 3 + 1] = out.color.g; colors[k * 3 + 2] = out.color.b;
+      extras[k * 2] = out.thickness; extras[k * 2 + 1] = out.phase;
     }
   }
   for (let j = 0; j < vSteps; j++) {
@@ -30,335 +54,435 @@ function surfaceGeometry(sample, uSteps, vSteps, colorAt) {
     }
   }
   const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
-  if (colorAt) geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  geometry.setAttribute('aExtra', new THREE.BufferAttribute(extras, 2));
   geometry.setIndex(indices);
   geometry.computeVertexNormals();
   return geometry;
 }
+const cosineRows = v => (1 - Math.cos(v * Math.PI)) / 2;
 
-function botanicalTexture(kind) {
-  const size = 256;
-  const canvas = document.createElement('canvas');
-  canvas.width = canvas.height = size;
-  const ctx = canvas.getContext('2d');
-  const pixels = ctx.createImageData(size, size);
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const wave = kind === 'petal'
-        ? Math.sin(x * 0.63 + Math.sin(y * 0.037) * 2) * 8 + Math.sin(x * 1.71 + y * 0.026) * 3
-        : Math.sin(x * 0.8 + Math.sin(y * 0.09)) * 11;
-      const value = 128 + wave + (random() - 0.5) * 35;
-      const index = (y * size + x) * 4;
-      pixels.data[index] = pixels.data[index + 1] = pixels.data[index + 2] = value;
-      pixels.data[index + 3] = 255;
-    }
-  }
-  ctx.putImageData(pixels, 0, 0);
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
-  texture.anisotropy = 4;
-  return texture;
-}
-
-function petalSurface(options) {
-  const { angle, radius, base, height, openness, width, phase, twist } = options;
-  return (u, t) => {
-    const across = u * 2 - 1;
-    const growth = Math.pow(Math.sin(t * Math.PI / 2), 1.12);
-    // An oval domain gives the whole petal a continuous round silhouette.
-    // Its attachment is narrow; its shoulders swell and fold around the bud.
-    const outline = Math.pow(Math.max(0, Math.sin(t * Math.PI)), 0.52) * Math.pow(t, 0.22);
-    const belly = Math.sin(t * Math.PI);
-    const bow = 0.07 + Math.sin(phase) * 0.018;
-    const rollProgress = THREE.MathUtils.smoothstep(t, 0.62, 1);
-    const rollAngle = rollProgress * 1.35;
-    const rollRadius = radius * (0.035 + openness * 0.16);
-    // Most of the visible oval rim lies along the two sides of the surface,
-    // rather than only at t=1. Curl those shoulders as well as the central tip.
-    const shoulderAngle = THREE.MathUtils.smoothstep(Math.abs(across), 0.56, 1)
-      * outline * Math.pow(t, 0.45) * 1.6;
-    const shoulderRadius = radius * 0.11;
-    const edgeWeight = Math.pow(Math.abs(across), 4) * outline;
-    const edgeWave = Math.sin(t * 7 + phase) * 0.019
-      + Math.sin(t * 12 - phase) * 0.005;
-    // The outer petals flare progressively away from the bud, then turn down
-    // at the lip; the small central petals keep their tighter spiral.
-    const radial = base + (radius - base) * growth + openness * Math.pow(t, 3)
-      - (1 - across * across) * belly * radius * 0.045
-      + rollRadius * Math.sin(rollAngle)
-      + shoulderRadius * (1 - Math.cos(shoulderAngle))
-      + edgeWave * edgeWeight * radius * 0.45;
-    // Bow the body, cup it across its width, and roll the lip through a circular
-    // arc. All variations close at the tip and attachment to avoid torn seams.
-    const y = height * (t + bow * belly)
-      - openness * 0.75 * Math.pow(t, 5)
-      + across * across * outline * radius * 0.09
-      - rollRadius * (1 - Math.cos(rollAngle))
-      - shoulderRadius * Math.sin(shoulderAngle)
-      + edgeWave * edgeWeight * radius
-      + across * outline * Math.sin(phase) * radius * 0.04;
-    const theta = angle + twist * (t + 0.18 * belly) + across * width * outline * 1.65;
-    return new THREE.Vector3(
-      Math.sin(theta) * radial,
-      y,
-      Math.cos(theta) * radial,
-    );
-  };
-}
-
-function mergeMesh(geometries, material, parent, shadows = true) {
-  const merged = mergeGeometries(geometries);
-  const mesh = new THREE.Mesh(merged, material);
-  mesh.castShadow = shadows;
-  mesh.receiveShadow = shadows;
+function mergeMesh(geometries, material, parent, name) {
+  const mesh = new THREE.Mesh(mergeGeometries(geometries), material);
+  mesh.castShadow = mesh.receiveShadow = true;
+  mesh.name = name;
   parent.add(mesh);
   geometries.forEach(geometry => geometry.dispose());
   return mesh;
 }
 
+// ---------------------------------------------------------------------------
+// Petal and sepal blades
+
+function petalOutline(t, p) {
+  // Obovate: a narrow claw, shoulders swelling past the middle, a rounded rim.
+  const rise = 0.16 + 0.84 * (1 - Math.pow(1 - t, 2.0));
+  const top = t < p.widest ? 1 : Math.sqrt(Math.max(0, 1 - Math.pow((t - p.widest) / (1 - p.widest), 2.3)));
+  return rise * top * (1 + 0.035 * Math.sin(t * 19 + p.phase));
+}
+function sepalOutline(t) {
+  // Lanceolate: widest a third of the way up, tapering to a fine point.
+  return Math.pow(Math.sin(Math.PI * Math.pow(t, 0.55)), 0.9) * (1 + 0.05 * Math.sin(t * 43));
+}
+
+function createBladeSampler(p) {
+  // Integrate the midrib in the (radial, vertical) plane. Its lean angle psi
+  // runs from the base value to the tip value, changing fastest near the tip.
+  const K = 64;
+  const R = new Float32Array(K + 1), Y = new Float32Array(K + 1), PSI = new Float32Array(K + 1);
+  const psiAt = t => p.psi0 + (p.psi1 - p.psi0) * (p.ease * t + (1 - p.ease) * Math.pow(t, p.curl));
+  let r = p.r0, y = p.y0;
+  R[0] = r; Y[0] = y; PSI[0] = p.psi0;
+  for (let k = 1; k <= K; k++) {
+    const psi = psiAt((k - 0.5) / K);
+    r += Math.sin(psi) * p.length / K;
+    y += Math.cos(psi) * p.length / K;
+    R[k] = r; Y[k] = y; PSI[k] = psiAt(k / K);
+  }
+  const eR = new THREE.Vector3(Math.sin(p.angle), 0, Math.cos(p.angle));
+  const eT = new THREE.Vector3(Math.cos(p.angle), 0, -Math.sin(p.angle));
+  const outline = p.shape === 'sepal' ? sepalOutline : petalOutline;
+
+  return (x, t) => {
+    const f = t * K, k = Math.min(K - 1, Math.floor(f)), a = f - k;
+    const rM = R[k] + (R[k + 1] - R[k]) * a;
+    const yM = Y[k] + (Y[k + 1] - Y[k]) * a;
+    const psi = PSI[k] + (PSI[k + 1] - PSI[k]) * a;
+    const tangentR = Math.sin(psi), tangentY = Math.cos(psi);
+    const normalR = -Math.cos(psi), normalY = Math.sin(psi); // towards the axis
+    const w = outline(t, p) * p.width;
+    const s = x * w;
+    // The blade cups around the bud; open petals flatten towards the rim.
+    const cup = p.cup * (1 - smoothstep(t, p.flattenStart, 1) * p.flatten);
+    const rho = Math.max(Math.abs(rM) / Math.max(cup, 1e-3), w / p.maxWrap, 1e-4);
+    let across = rho * Math.sin(s / rho);
+    let inward = rho * (1 - Math.cos(s / rho));
+    // Corners fold back and down, the signature of a hybrid tea.
+    const cornerT = smoothstep(t, 0.45, 1);
+    const cornerX = Math.pow(smoothstep(Math.abs(x), 0.15, 1), 1.9);
+    const corner = cornerT * cornerT * cornerX * p.corner * (x < 0 ? p.cornerLeft : p.cornerRight);
+    inward -= corner;
+    const along = -corner * 0.55;
+    // A soft ruffle along the free rim.
+    const rim = Math.max(smoothstep(Math.abs(x), 0.55, 1), smoothstep(t, 0.72, 1));
+    inward += Math.sin(x * 4.2 * p.ruffleFreq + p.phase) * Math.sin(t * 6 + p.phase * 0.7) * p.ruffle * rim * t;
+    // Slight twist about the midrib.
+    const tw = p.twist * t, ct = Math.cos(tw), st = Math.sin(tw);
+    const at = across * ct - inward * st, bt = across * st + inward * ct;
+    const radial = rM + normalR * bt + tangentR * along;
+    const height = yM + normalY * bt + tangentY * along;
+    return new THREE.Vector3(eR.x * radial + eT.x * at, height, eR.z * radial + eT.z * at);
+  };
+}
+
+function petalParameters(depth, index) {
+  const d = depth;
+  return {
+    shape: 'petal',
+    angle: index * GOLDEN_ANGLE + jitter(0.05),
+    r0: lerp(0.215, 0.018, Math.pow(d, 0.8)),
+    y0: lerp(-0.06, 0.05, d) + jitter(0.008),
+    length: lerp(1.02, 0.60, Math.pow(d, 0.9)) * (1 + jitter(0.035)),
+    psi0: lerp(0.34, 0.03, Math.pow(d, 0.7)) + jitter(0.035),
+    psi1: (d < 0.35
+      ? lerp(2.05, 1.05, d / 0.35)
+      : lerp(1.05, -0.14, Math.pow((d - 0.35) / 0.65, 0.85))) + jitter(d < 0.4 ? 0.2 : 0.06),
+    ease: lerp(0.2, 0.55, d),
+    curl: lerp(2.6, 3.2, d),
+    width: lerp(0.66, 0.30, Math.pow(d, 0.75)) * (1 + jitter(0.05)),
+    widest: 0.52 + jitter(0.06),
+    cup: lerp(0.72, 1.0, d),
+    flattenStart: 0.5,
+    flatten: lerp(1.08, 0.15, d),
+    maxWrap: 2.5,
+    corner: lerp(0.2, 0, Math.pow(d, 0.6)),
+    cornerLeft: 0.7 + random() * 0.6,
+    cornerRight: 0.7 + random() * 0.6,
+    ruffle: lerp(0.024, 0.005, d),
+    ruffleFreq: 0.8 + random() * 0.6,
+    twist: jitter(0.18),
+    phase: random() * TAU,
+  };
+}
+
+// ---------------------------------------------------------------------------
+
 export function createRose({ petalColor, mobile }) {
   seed = 419;
   const rose = new THREE.Group();
-  rose.name = 'Rosa botánica';
+  rose.name = 'Rosa';
   const flower = new THREE.Group();
-  flower.name = 'Corola · pétalos en espiral';
-  flower.position.set(0.015, 0.83, 0);
-  flower.rotation.set(0.12, 0.2, -0.11);
+  flower.name = 'Corola';
+  flower.position.set(0.015, 0.86, 0);
+  flower.rotation.set(0.15, 0.2, -0.09);
+  flower.scale.setScalar(1.25);
   rose.add(flower);
 
-  const petalBump = botanicalTexture('petal');
-  const greenBump = botanicalTexture('stem');
-  const petalMaterial = new THREE.MeshPhysicalMaterial({
-    color: petalColor,
-    vertexColors: true,
-    roughness: 0.59,
-    metalness: 0,
-    sheen: 0.30,
-    sheenColor: new THREE.Color('#8b1835'),
-    sheenRoughness: 0.72,
-    bumpMap: petalBump,
-    bumpScale: 0.005,
-    side: THREE.DoubleSide,
-    emissive: '#470511',
-    emissiveIntensity: 0.055,
-  });
+  const petalTextures = createPetalTextures(mobile ? 512 : 1024);
+  const leafTextures = createLeafTextures(mobile ? 512 : 768);
+  const stemTextures = createStemTextures();
 
-  // Soft transmitted red light at the thin tips. This inexpensive scattering
-  // approximation avoids full-screen transmission buffers on mobile GPUs.
-  petalMaterial.onBeforeCompile = shader => {
-    shader.fragmentShader = shader.fragmentShader.replace(
-      '#include <opaque_fragment>',
-      `float petalBacklight = pow(clamp(dot(normalize(vViewPosition), -normal), 0.0, 1.0), 2.0);
-       outgoingLight += vec3(0.22, 0.009, 0.018) * petalBacklight * 0.22;
-       #include <opaque_fragment>`,
-    );
+  // --- Petal material: velvet sheen, veins, and light carried through the thin blade.
+  const uniforms = {
+    uTime: { value: 0 },
+    uSwayAmp: { value: 0.012 },
+    uKeyDir: { value: new THREE.Vector3(0, 1, 0) },
+    uKeyColor: { value: new THREE.Color('#fff1e0') },
   };
-  const petals = [];
-  const surfaces = [];
-  // The alternating whorls overlap; each petal has its own asymmetry and curl.
-  const layers = [
-    { count: 5, radius: 1.10, base: 0.085, height: 0.72, openness: 0.26, width: 0.96, y: 0.015 },
-    { count: 6, radius: 0.96, base: 0.075, height: 0.86, openness: 0.21, width: 0.90, y: 0.01 },
-    { count: 6, radius: 0.80, base: 0.065, height: 1.00, openness: 0.15, width: 0.89, y: 0.015 },
-    { count: 5, radius: 0.60, base: 0.045, height: 1.08, openness: 0.10, width: 0.88, y: 0.025 },
-    { count: 5, radius: 0.40, base: 0.035, height: 1.12, openness: 0.055, width: 1.01, y: 0.025 },
-    { count: 4, radius: 0.21, base: 0.02, height: 1.12, openness: 0.025, width: 1.12, y: 0.025 },
-    { count: 3, radius: 0.085, base: 0.012, height: 1.09, openness: 0.01, width: 1.3, y: 0.015 },
-  ];
-  let petalIndex = 0;
-  layers.forEach((layer, layerIndex) => {
-    for (let i = 0; i < layer.count; i++) {
-      const phase = random() * TAU;
-      const nextLayer = layers[Math.min(layerIndex + 1, layers.length - 1)];
-      const progress = i / layer.count;
-      const options = {
-        ...layer,
-        angle: petalIndex++ * 2.39996 + (random() - 0.5) * 0.08,
-        radius: lerp(layer.radius, nextLayer.radius, progress) * (0.99 + random() * 0.02),
-        height: lerp(layer.height, nextLayer.height, progress) * (0.975 + random() * 0.05),
-        width: layer.width * (0.96 + random() * 0.08),
-        twist: (random() - 0.5) * 0.22 + (layerIndex > 3 ? 0.3 : 0),
-        phase,
-      };
-      const sample = petalSurface(options);
-      const colorAt = (u, t) => {
-        const edge = Math.pow(t, 4);
-        const baseShade = 0.51 + 0.42 * Math.pow(t, 0.55);
-        const variation = Math.sin(u * 25 + phase + t * 2) * 0.02;
-        return new THREE.Color().setRGB(
-          baseShade + edge * 0.08 + variation,
-          baseShade * (0.80 + edge * 0.14) + variation,
-          baseShade * (0.85 + edge * 0.11) + variation,
-        );
-      };
-      // Cosine spacing resolves the rolled oval tips without adding polygons.
-      const geometry = surfaceGeometry((u, v) => sample(u, (1 - Math.cos(v * Math.PI)) / 2), mobile ? 32 : 44, mobile ? 30 : 40, colorAt);
-      geometry.translate(0, layer.y, 0);
-      petals.push(geometry);
-      if (layerIndex < 3) surfaces.push({ sample, y: layer.y });
-    }
-  });
-  const petalMesh = mergeMesh(petals, petalMaterial, flower);
-  petalMesh.name = `${petalIndex} pétalos aterciopelados`;
+  const injectSway = vertexShader => vertexShader
+    .replace('#include <common>', `#include <common>
+      uniform float uTime; uniform float uSwayAmp;
+      attribute vec2 aExtra;
+      varying float vThick;
+      ${SWAY_GLSL}`)
+    .replace('#include <begin_vertex>', `#include <begin_vertex>
+      vThick = aExtra.x;
+      transformed += normal * petalSway(aExtra.y, uv.y, uTime) * uSwayAmp;`);
 
-  const stemMaterial = new THREE.MeshStandardMaterial({
-    color: '#42512a', roughness: 0.78, bumpMap: greenBump, bumpScale: 0.018,
+  function addTranslucency(material, sssColor, strength) {
+    const sss = { value: new THREE.Color(sssColor) };
+    material.onBeforeCompile = shader => {
+      Object.assign(shader.uniforms, uniforms, { uSssColor: sss });
+      shader.vertexShader = injectSway(shader.vertexShader);
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', `#include <common>
+          uniform vec3 uKeyDir; uniform vec3 uKeyColor; uniform vec3 uSssColor;
+          varying float vThick;`)
+        .replace('#include <opaque_fragment>', `
+          {
+            vec3 V = normalize(vViewPosition);
+            vec3 L = normalize(uKeyDir);
+            float thin = 1.0 - vThick;
+            float trans = pow(clamp(dot(V, normalize(-(L + normal * 0.35))), 0.0, 1.0), 3.0);
+            float ndl = dot(normal, L);
+            float wrapped = clamp((ndl + 0.6) / 1.6, 0.0, 1.0) - clamp(ndl, 0.0, 1.0);
+            vec3 scatter = uSssColor * (trans * 1.7 + 0.12) * thin
+              + vec3(wrapped * 0.45 * (0.4 + thin * 0.6))
+              + vec3(pow(thin, 6.0) * 0.3);
+            outgoingLight += scatter * uKeyColor * diffuseColor.rgb * ${strength.toFixed(2)};
+          }
+          #include <opaque_fragment>`);
+    };
+  }
+  const petalMaterial = new THREE.MeshPhysicalMaterial({
+    color: '#ffffff',
+    vertexColors: true,
+    map: petalTextures.map,
+    bumpMap: petalTextures.bump,
+    bumpScale: 0.014,
+    roughness: 0.7,
+    metalness: 0,
+    specularIntensity: 0.3,
+    sheen: 0.5,
+    sheenColor: new THREE.Color('#ff6070'),
+    sheenRoughness: 0.55,
+    envMapIntensity: 0.5,
+    side: THREE.DoubleSide,
+  });
+  addTranslucency(petalMaterial, new THREE.Color(1.0, 0.2, 0.09), 1);
+  const petalDepthMaterial = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking, side: THREE.DoubleSide });
+  petalDepthMaterial.onBeforeCompile = shader => {
+    Object.assign(shader.uniforms, uniforms);
+    shader.vertexShader = injectSway(shader.vertexShader);
+  };
+
+  // --- Petals
+  const mainColor = new THREE.Color(petalColor);
+  const deepColor = mainColor.clone().multiply(new THREE.Color(0.20, 0.10, 0.15));
+  const edgeColor = mainColor.clone().lerp(new THREE.Color('#ff6a7a'), 0.4);
+  const guardColor = mainColor.clone().lerp(new THREE.Color('#3a1a1e'), 0.35);
+  const agedRim = new THREE.Color('#3b1015');
+  const petalCount = mobile ? 34 : 40;
+  const petals = [];
+  const tint = new THREE.Color();
+  for (let index = 0; index < petalCount; index++) {
+    const depth = index / (petalCount - 1);
+    const p = petalParameters(depth, index);
+    const sample = createBladeSampler(p);
+    tint.setRGB(1 + jitter(0.04), 1 + jitter(0.03), 1 + jitter(0.03));
+    const guard = smoothstep(depth, 0.14, 0);
+    const vertexData = (x, t, out, position) => {
+      // Crevice darkening: the base of every blade, and anything deep in the cup.
+      const baseOcclusion = clamp(Math.pow(1 - t, 1.6) * (0.55 + 0.4 * depth), 0, 0.9);
+      const radial = Math.hypot(position.x, position.z);
+      const exposure = Math.max(smoothstep(position.y, 0.0, 0.5), smoothstep(radial, 0.45, 0.85) * 0.92);
+      const ao = Math.pow((1 - baseOcclusion) * (0.16 + 0.84 * exposure), 0.75);
+      const rim = Math.max(smoothstep(t, 0.78, 1), smoothstep(Math.abs(x), 0.72, 1)) * 0.38 * (0.4 + 0.6 * exposure);
+      out.color.copy(deepColor).lerp(mainColor, ao).lerp(edgeColor, rim).multiply(tint);
+      if (guard > 0) out.color.lerp(guardColor, guard * 0.7).lerp(agedRim, guard * smoothstep(t, 0.86, 1) * 0.8);
+      out.thickness = clamp((0.15 + 0.85 * (1 - Math.pow(t, 1.3))) * (1 - 0.7 * smoothstep(Math.abs(x), 0.5, 1)), 0.08, 1);
+      out.phase = p.phase / TAU;
+    };
+    petals.push(surfaceGeometry(sample, mobile ? 26 : 40, mobile ? 30 : 46, vertexData, cosineRows));
+  }
+  const petalMesh = mergeMesh(petals, petalMaterial, flower, `${petalCount} pétalos`);
+  petalMesh.customDepthMaterial = petalDepthMaterial;
+
+  // --- Sepals and receptacle
+  const leafMaterial = new THREE.MeshPhysicalMaterial({
+    color: '#ffffff',
+    vertexColors: true,
+    map: leafTextures.map,
+    bumpMap: leafTextures.bump,
+    bumpScale: 0.012,
+    roughness: 0.62,
+    specularIntensity: 0.5,
+    clearcoat: 0.12,
+    clearcoatRoughness: 0.45,
+    envMapIntensity: 0.15,
+    side: THREE.DoubleSide,
+  });
+  addTranslucency(leafMaterial, new THREE.Color(0.45, 0.75, 0.12), 0.5);
+  const leafDark = new THREE.Color('#182f10');
+  const leafMain = new THREE.Color('#27481a');
+  const leafRib = new THREE.Color('#4d6e2c');
+  const leafYoung = new THREE.Color('#6d3a25');
+  const sepalTip = new THREE.Color('#587a30');
+  const foliage = [];
+  for (let i = 0; i < 5; i++) {
+    const p = {
+      shape: 'sepal',
+      angle: i * TAU / 5 + 0.35 + jitter(0.08),
+      r0: 0.085, y0: -0.07,
+      length: 0.5 + jitter(0.05),
+      psi0: 1.05 + jitter(0.1), psi1: 3.05 + jitter(0.2), ease: 0.55, curl: 1.8,
+      width: 0.095 + jitter(0.01), widest: 0.3,
+      cup: 0.55, flattenStart: 0.6, flatten: 0.3, maxWrap: 2,
+      corner: 0, cornerLeft: 0, cornerRight: 0,
+      ruffle: 0.004, ruffleFreq: 1, twist: jitter(0.5), phase: random() * TAU,
+    };
+    const sepal = surfaceGeometry(createBladeSampler(p), 10, 40, (x, t, out) => {
+      out.color.copy(leafDark).lerp(sepalTip, Math.pow(t, 1.4) * 0.5 + (1 - Math.abs(x)) * 0.1);
+      out.thickness = 0.7; out.phase = p.phase / TAU;
+    });
+    flower.updateMatrix();
+    sepal.applyMatrix4(flower.matrix);
+    foliage.push(sepal);
+  }
+  const receptacleProfile = [];
+  for (let i = 0; i <= 14; i++) {
+    const f = i / 14;
+    const yy = lerp(-0.42, 0.0, f);
+    const bulge = Math.sin(Math.PI * Math.pow(f, 0.7));
+    const rr = f === 1 ? 0.001 : 0.034 + bulge * 0.075 * (1 - Math.pow(f, 6));
+    receptacleProfile.push(new THREE.Vector2(rr, yy));
+  }
+  const receptacleMaterial = new THREE.MeshPhysicalMaterial({
+    color: '#4c6a2c', roughness: 0.5, clearcoat: 0.35, clearcoatRoughness: 0.4,
+    bumpMap: stemTextures.bump, bumpScale: 0.01,
+  });
+  const receptacle = new THREE.Mesh(new THREE.LatheGeometry(receptacleProfile, 28), receptacleMaterial);
+  receptacle.castShadow = receptacle.receiveShadow = true;
+  receptacle.name = 'Receptáculo';
+  flower.add(receptacle);
+
+  // --- Stem
+  const stemMaterial = new THREE.MeshPhysicalMaterial({
+    color: '#ffffff', map: stemTextures.map, bumpMap: stemTextures.bump, bumpScale: 0.012,
+    roughness: 0.55, clearcoat: 0.25, clearcoatRoughness: 0.5,
   });
   const stemCurve = new THREE.CatmullRomCurve3([
-    new THREE.Vector3(-0.14, -2.18, 0.04),
-    new THREE.Vector3(-0.20, -1.48, 0.01),
-    new THREE.Vector3(-0.13, -0.70, -0.015),
-    new THREE.Vector3(0.025, 0.1, 0.025),
-    new THREE.Vector3(0.015, 0.86, 0),
+    new THREE.Vector3(-0.15, -2.4, 0.05),
+    new THREE.Vector3(-0.21, -1.5, 0.0),
+    new THREE.Vector3(-0.13, -0.7, -0.02),
+    new THREE.Vector3(0.03, 0.12, 0.03),
+    new THREE.Vector3(0.015, 0.5, 0.0),
   ]);
-  const stemGeometry = new THREE.TubeGeometry(stemCurve, 70, 0.037, 10, false);
-  // Taper the stem along its length, keeping its organic centerline.
+  const stemGeometry = new THREE.TubeGeometry(stemCurve, 110, 0.044, 16, false);
   const stemPosition = stemGeometry.attributes.position;
+  const centre = new THREE.Vector3(), point = new THREE.Vector3();
   for (let i = 0; i < stemPosition.count; i++) {
     const t = stemGeometry.attributes.uv.getX(i);
-    const center = stemCurve.getPointAt(t);
-    const p = new THREE.Vector3().fromBufferAttribute(stemPosition, i);
-    p.sub(center).multiplyScalar(0.66 + 0.40 * t).add(center);
-    stemPosition.setXYZ(i, p.x, p.y, p.z);
+    stemCurve.getPointAt(t, centre);
+    point.fromBufferAttribute(stemPosition, i).sub(centre).multiplyScalar(1.0 - 0.3 * t).add(centre);
+    stemPosition.setXYZ(i, point.x, point.y, point.z);
   }
   stemGeometry.computeVertexNormals();
   const stem = new THREE.Mesh(stemGeometry, stemMaterial);
   stem.castShadow = stem.receiveShadow = true;
-  stem.name = 'Tallo curvado';
+  stem.name = 'Tallo';
   rose.add(stem);
 
-  const hip = new THREE.Mesh(new THREE.SphereGeometry(0.12, 20, 16), stemMaterial);
-  hip.position.set(0.015, 0.84, 0);
-  hip.scale.set(1, 1.55, 1);
-  rose.add(hip);
+  // --- Prickles: broad footprint along the stem, hooked downward, flushed red.
+  const prickleMaterial = new THREE.MeshPhysicalMaterial({ vertexColors: true, roughness: 0.42, clearcoat: 0.4 });
+  const prickleBase = new THREE.Color('#5b4a2a').lerp(new THREE.Color('#4c6a2c'), 0.3);
+  const prickleTip = new THREE.Color('#3a1a12');
+  const prickleFlush = new THREE.Color('#8a3a2a');
+  const prickles = [];
+  for (let i = 0; i < 9; i++) {
+    const t = 0.13 + i * 0.086 + jitter(0.015);
+    const attach = stemCurve.getPointAt(t);
+    const stemTangent = stemCurve.getTangentAt(t);
+    const angle = i * 2.39996 + 0.65;
+    const size = 0.085 + random() * 0.045;
+    const outward = new THREE.Vector3(Math.sin(angle), 0, Math.cos(angle));
+    outward.sub(stemTangent.clone().multiplyScalar(outward.dot(stemTangent))).normalize();
+    const side = new THREE.Vector3().crossVectors(stemTangent, outward).normalize();
+    const stemRadius = 0.044 * (1 - 0.3 * t);
+    const sample = (x, v) => {
+      const ring = (x + 1) * Math.PI;
+      const radius = Math.pow(1 - v, 1.55) * 0.038;
+      return attach.clone()
+        .addScaledVector(outward, stemRadius * 0.7 + size * Math.sin(v * 1.35))
+        .addScaledVector(side, Math.sin(ring) * radius)
+        .addScaledVector(stemTangent, Math.cos(ring) * radius * 2.1 - v * v * size * 0.8);
+    };
+    prickles.push(surfaceGeometry(sample, 12, 10, (x, v, out) => {
+      out.color.copy(prickleBase).lerp(prickleFlush, smoothstep(v, 0.15, 0.6)).lerp(prickleTip, Math.pow(v, 2.2));
+      out.thickness = 1; out.phase = 0;
+    }));
+  }
+  mergeMesh(prickles, prickleMaterial, rose, 'Espinas');
 
-  const leafMaterial = new THREE.MeshPhysicalMaterial({
-    color: '#527332', vertexColors: true, roughness: 0.55,
-    clearcoat: 0.22, clearcoatRoughness: 0.55,
-    side: THREE.DoubleSide, bumpMap: greenBump, bumpScale: 0.016,
-  });
-  const leaves = [], branches = [], veins = [];
-  const veinMaterial = new THREE.LineBasicMaterial({ color: '#78904b', transparent: true, opacity: 0.44 });
-  function addLeaf(start, end, leafWidth, roll, hue) {
+  // --- Compound leaves: five serrated leaflets on the lower stalks, three above.
+  const branches = [];
+  function leafletOutline(t) {
+    const body = Math.pow(Math.sin(Math.PI * Math.pow(t, 0.7)), 0.85);
+    const tooth = Math.pow(((t * 17 + 0.3) % 1), 1.4) * smoothstep(t, 0.08, 0.25) * (1 - smoothstep(t, 0.9, 1));
+    return body * (1 - 0.065 * tooth);
+  }
+  function addLeaflet(start, end, halfWidth, bladeNormal, youth) {
     const length = start.distanceTo(end);
     const direction = end.clone().sub(start).normalize();
-    let side = new THREE.Vector3().crossVectors(direction, new THREE.Vector3(0, 0, 1)).normalize();
-    side.applyAxisAngle(direction, roll);
-    const normal = new THREE.Vector3().crossVectors(side, direction).normalize();
-    const sample = (u, t) => {
-      const x = u * 2 - 1;
-      // The tooth rhythm follows the actual silhouette, not a painted texture.
-      const teeth = 1 - 0.065 * Math.pow(Math.abs(Math.sin(t * Math.PI * 17)), 3);
-      const width = Math.pow(Math.sin(Math.PI * t), 0.83) * leafWidth * teeth;
-      return start.clone().addScaledVector(direction, t * length)
+    const side = new THREE.Vector3().crossVectors(bladeNormal, direction).normalize();
+    const normal = new THREE.Vector3().crossVectors(direction, side).normalize();
+    const phase = random() * TAU;
+    const droop = 0.12 + random() * 0.1;
+    const sample = (x, t) => {
+      const width = leafletOutline(t) * halfWidth;
+      const lift = Math.abs(x) * width * 0.35 * (1 - t * 0.5);
+      const wave = Math.sin(t * 9 + phase) * 0.012 * t + Math.sin(x * 3 + phase) * 0.006;
+      return start.clone()
+        .addScaledVector(direction, t * length)
         .addScaledVector(side, x * width)
-        .addScaledVector(normal,
-          Math.sin(t * Math.PI) * (0.055 - Math.abs(x) * 0.12)
-          + Math.sin(t * 7) * 0.035 * t + Math.pow(t, 5) * 0.09);
+        .addScaledVector(normal, lift - Math.pow(t, 2.2) * droop * length + wave);
     };
-    leaves.push(surfaceGeometry(sample, 14, 42, (u, t) => {
-      const shade = 0.64 + 0.21 * Math.sin(t * Math.PI) + (1 - Math.abs(u * 2 - 1)) * 0.1;
-      return new THREE.Color().setRGB(shade * hue, shade, shade * 0.81);
+    foliage.push(surfaceGeometry(sample, 12, 56, (x, t, out) => {
+      const rib = Math.pow(1 - Math.abs(x), 3) * 0.55;
+      out.color.copy(leafDark).lerp(leafMain, 0.45 + 0.4 * Math.sin(t * Math.PI)).lerp(leafRib, rib * (1 - t * 0.5));
+      const margin = smoothstep(Math.abs(x), 0.78, 1) * 0.5 + Math.pow(t, 5) * 0.4;
+      out.color.lerp(leafYoung, youth * (0.28 + margin * 0.5));
+      out.thickness = 0.55 + 0.3 * (1 - t); out.phase = phase / TAU;
     }));
-    const veinPoint = (u, t) => sample(u, t).addScaledVector(normal, 0.004);
-    for (let step = 0; step < 20; step++) {
-      veins.push(...veinPoint(0.5, step / 20).toArray(), ...veinPoint(0.5, (step + 1) / 20).toArray());
-    }
-    for (let k = 1; k <= 8; k++) {
-      const baseT = 0.08 + k * 0.083;
-      for (const sign of [-1, 1]) {
-        for (let j = 0; j < 5; j++) {
-          const f = j / 5, g = (j + 1) / 5;
-          veins.push(...veinPoint(0.5 + sign * f * 0.47, baseT + f * 0.13).toArray(),
-            ...veinPoint(0.5 + sign * g * 0.47, baseT + g * 0.13).toArray());
-        }
-      }
-    }
   }
-
-  function addBranch(points) {
-    const curve = new THREE.CatmullRomCurve3(points);
-    branches.push(new THREE.TubeGeometry(curve, 16, 0.014, 7, false));
-    return curve;
-  }
-  // Rose foliage grows in alternate compound leaves with serrated leaflets.
-  const foliage = [
-    { points: [[-0.03, -0.10, 0], [-0.37, 0.06, 0.03], [-0.69, 0.24, 0.08]], tip: [-1.22, 0.61, 0.08], roll: -0.22 },
-    { points: [[-0.16, -0.88, 0], [0.18, -0.69, 0.06], [0.49, -0.45, 0.08]], tip: [1.07, -0.08, 0.16], roll: 0.22 },
-    { points: [[-0.20, -1.37, 0], [-0.43, -1.17, -0.13], [-0.60, -0.98, -0.27]], tip: [-0.97, -0.58, -0.43], roll: -0.50 },
-  ];
-  foliage.forEach(({ points, tip, roll }, index) => {
+  function addCompoundLeaf({ points, tipLength, leaflets, youth, scale }) {
     const vectors = points.map(p => new THREE.Vector3(...p));
-    const curve = addBranch(vectors);
-    const tipVector = new THREE.Vector3(...tip);
-    addLeaf(vectors[2], tipVector, 0.21 - index * 0.022, roll, 0.87);
-    const sign = index === 1 ? 1 : -1;
-    for (const side of [-1, 1]) {
-      const attach = curve.getPoint(0.58);
-      const leafEnd = attach.clone().add(new THREE.Vector3(sign * 0.26 + side * 0.09, side * 0.27 + 0.11, side * 0.19));
-      addLeaf(attach, leafEnd, 0.125, roll + side * 0.2, 0.82 + index * 0.08);
-    }
+    const curve = new THREE.CatmullRomCurve3(vectors);
+    branches.push(new THREE.TubeGeometry(curve, 20, 0.013 * scale, 8, false));
+    const up = new THREE.Vector3(0, 1, 0);
+    const endTangent = curve.getTangentAt(1);
+    const planeNormal = up.clone().sub(endTangent.clone().multiplyScalar(up.dot(endTangent))).normalize();
+    const terminalEnd = vectors[vectors.length - 1].clone().addScaledVector(endTangent, tipLength * scale);
+    addLeaflet(vectors[vectors.length - 1], terminalEnd, 0.19 * scale, planeNormal, youth);
+    const stations = leaflets === 5 ? [0.66, 0.38] : [0.6];
+    stations.forEach((station, pairIndex) => {
+      const attach = curve.getPointAt(station);
+      const tangent = curve.getTangentAt(station);
+      const pairNormal = up.clone().sub(tangent.clone().multiplyScalar(up.dot(tangent))).normalize();
+      const pairSide = new THREE.Vector3().crossVectors(tangent, pairNormal).normalize();
+      const size = (pairIndex === 0 ? 0.84 : 0.7) * scale;
+      for (const sign of [-1, 1]) {
+        const spread = 0.72 + jitter(0.1);
+        const dir = tangent.clone().multiplyScalar(Math.cos(spread))
+          .addScaledVector(pairSide, sign * Math.sin(spread))
+          .addScaledVector(pairNormal, -0.18)
+          .normalize();
+        const end = attach.clone().addScaledVector(dir, tipLength * size * 0.92);
+        const bladeNormal = pairNormal.clone().addScaledVector(pairSide, sign * 0.25).normalize();
+        addLeaflet(attach, end, 0.19 * size, bladeNormal, youth);
+      }
+    });
+  }
+  addCompoundLeaf({
+    points: [[-0.03, -0.05, 0.0], [-0.36, 0.10, 0.06], [-0.66, 0.30, 0.10]],
+    tipLength: 0.52, leaflets: 3, youth: 0.75, scale: 0.9,
   });
-
-  // Five lanceolate sepals cradle the base of the corolla.
-  for (let i = 0; i < 5; i++) {
-    const angle = i * TAU / 5 + 0.3;
-    const start = new THREE.Vector3(0.015 + Math.sin(angle) * 0.07, 0.79, Math.cos(angle) * 0.07);
-    const end = new THREE.Vector3(0.015 + Math.sin(angle) * 0.52, 0.85 + Math.sin(i * 2) * 0.1, Math.cos(angle) * 0.52);
-    addLeaf(start, end, 0.065, angle * 0.4, 0.9);
-  }
-  mergeMesh(leaves, leafMaterial, rose).name = 'Hojas dentadas y cinco sépalos';
-  mergeMesh(branches, stemMaterial, rose);
-  const veinGeometry = new THREE.BufferGeometry();
-  veinGeometry.setAttribute('position', new THREE.Float32BufferAttribute(veins, 3));
-  rose.add(new THREE.LineSegments(veinGeometry, veinMaterial));
-
-  // Rose prickles have a broad attachment and a downward-curving sharp tip.
-  const thornMaterial = new THREE.MeshStandardMaterial({ color: '#71613b', roughness: 0.67, vertexColors: true });
-  const thorns = [];
-  for (let i = 0; i < 11; i++) {
-    const t = 0.10 + i * 0.075;
-    const attach = stemCurve.getPoint(t);
-    const angle = i * 2.39996 + 0.65;
-    const size = 0.11 + random() * 0.055;
-    const outward = new THREE.Vector3(Math.sin(angle), 0, Math.cos(angle));
-    const tangent = new THREE.Vector3(Math.cos(angle), 0, -Math.sin(angle));
-    const sample = (u, v) => {
-      const ring = u * TAU;
-      const radius = Math.pow(1 - v, 1.6) * 0.043;
-      return attach.clone().addScaledVector(outward, 0.025 + size * Math.sin(v * 1.3))
-        .addScaledVector(tangent, Math.sin(ring) * radius)
-        .add(new THREE.Vector3(0, Math.cos(ring) * radius * 1.8 - v * v * size * 0.7, 0));
-    };
-    thorns.push(surfaceGeometry(sample, 9, 9, (u, v) => new THREE.Color().setRGB(0.65 + v * 0.3, 0.8 - v * 0.35, 0.52 - v * 0.2)));
-  }
-  mergeMesh(thorns, thornMaterial, rose).name = 'Espinas recurvadas';
-
-  const dewMaterial = new THREE.MeshPhysicalMaterial({
-    color: '#ffe1df', metalness: 0.05, roughness: 0.08,
-    transparent: true, opacity: 0.48, clearcoat: 1, clearcoatRoughness: 0,
-    envMapIntensity: 2.2,
+  addCompoundLeaf({
+    points: [[-0.16, -0.9, 0.0], [0.22, -0.74, 0.1], [0.58, -0.52, 0.12]],
+    tipLength: 0.6, leaflets: 5, youth: 0.2, scale: 1.0,
   });
-  const dewGeometry = new THREE.SphereGeometry(1, 12, 8);
-  for (let i = 0; i < 12; i++) {
-    const { sample, y } = surfaces[(i * 7) % surfaces.length];
-    const u = 0.32 + random() * 0.35, t = 0.73 + random() * 0.2;
-    const position = sample(u, t);
-    const du = sample(u + 0.001, t).sub(position);
-    const dt = sample(u, t + 0.001).sub(position);
-    const normal = new THREE.Vector3().crossVectors(dt, du).normalize();
-    if (normal.y < 0) normal.negate();
-    const radius = 0.011 + random() * 0.013;
-    const drop = new THREE.Mesh(dewGeometry, dewMaterial);
-    drop.position.copy(position).addScaledVector(normal, radius * 0.42);
-    drop.position.y += y;
-    drop.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), normal);
-    drop.scale.set(radius, radius * 0.58, radius * 1.14);
-    flower.add(drop);
-  }
+  addCompoundLeaf({
+    points: [[-0.2, -1.42, 0.0], [-0.44, -1.24, -0.16], [-0.64, -1.05, -0.32]],
+    tipLength: 0.58, leaflets: 5, youth: 0.05, scale: 0.95,
+  });
+  mergeMesh(foliage, leafMaterial, rose, 'Hojas y sépalos').customDepthMaterial = petalDepthMaterial;
+  mergeMesh(branches, receptacleMaterial, rose, 'Peciolos');
 
-  rose.rotation.z = -0.04;
+  const baseRotation = new THREE.Euler(0, 0, -0.04);
+  rose.rotation.copy(baseRotation);
+
+  function animate(time, camera, keyLight) {
+    uniforms.uTime.value = time;
+    uniforms.uKeyDir.value.copy(keyLight.position).normalize().transformDirection(camera.matrixWorldInverse);
+    uniforms.uKeyColor.value.copy(keyLight.color).multiplyScalar(Math.min(1, keyLight.intensity / 3));
+    // The cut stem breathes with the room.
+    rose.rotation.z = baseRotation.z + Math.sin(time * 0.31) * 0.007 + Math.sin(time * 0.113) * 0.005;
+    rose.rotation.x = Math.sin(time * 0.27 + 1) * 0.006;
+  }
+  animate(0, new THREE.PerspectiveCamera(), new THREE.DirectionalLight());
+
+  rose.userData = { animate, uniforms, flower };
   return rose;
 }

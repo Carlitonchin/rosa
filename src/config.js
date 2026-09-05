@@ -5,6 +5,6 @@ export const DEDICATION = 'Te elegiría a ti. Una y mil vidas más.';
 export const ROSE_CONFIG = {
   autoRotate: true,
   // Negative speed moves the visible sentence from right to left for reading.
-  rotationSpeed: -0.38,
-  petalColor: '#8e071f',
+  rotationSpeed: -0.55,
+  petalColor: '#a00e2b',
 };

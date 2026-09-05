@@ -1,9 +1,10 @@
 import './style.css';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { createRose } from './rose.js';
 import { createDedicationRing } from './ring.js';
+import { createStudioEnvironment, createBackdrop } from './environment.js';
+import { createPost } from './post.js';
 import { DEDICATION, ROSE_CONFIG } from './config.js';
 
 const container = document.querySelector('#scene');
@@ -12,69 +13,67 @@ const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 container.setAttribute('aria-label', `Rosa tridimensional. Dedicatoria: ${DEDICATION}`);
 
 async function start() {
-  const mobile = window.matchMedia('(max-width: 760px)').matches;
-  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'default' });
+  const viewport = container.getBoundingClientRect();
+  const mobile = window.matchMedia('(pointer: coarse)').matches
+    || (viewport.width || window.innerWidth || 1024) <= 760;
+  const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: false, powerPreference: 'high-performance' });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, mobile ? 1.65 : 2));
-  renderer.setClearColor('#ffffff', 1);
+  renderer.setClearColor('#120a0d', 1);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.02;
+  renderer.toneMappingExposure = 0.96;
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFShadowMap;
-  renderer.shadowMap.autoUpdate = false;
+  renderer.shadowMap.autoUpdate = !mobile;
   renderer.shadowMap.needsUpdate = true;
   container.appendChild(renderer.domElement);
   renderer.domElement.setAttribute('aria-hidden', 'true');
 
   const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(33, 1, 0.1, 60);
+  const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 80);
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
-  controls.dampingFactor = 0.065;
+  controls.dampingFactor = 0.06;
   controls.enablePan = false;
-  controls.rotateSpeed = 0.62;
+  controls.rotateSpeed = 0.6;
   controls.zoomSpeed = 0.6;
   controls.zoomToCursor = true;
   controls.cursorStyle = 'grab';
-  controls.minPolarAngle = 0.10;
-  controls.maxPolarAngle = Math.PI - 0.1;
-  controls.target.set(0, -0.13, 0);
+  controls.minPolarAngle = 0.12;
+  controls.maxPolarAngle = Math.PI - 0.12;
+  controls.target.set(0, 0.18, 0);
   controls.autoRotateSpeed = ROSE_CONFIG.rotationSpeed;
 
-  const environment = new RoomEnvironment();
-  const pmrem = new THREE.PMREMGenerator(renderer);
-  const environmentTarget = pmrem.fromScene(environment, 0.025);
-  scene.environment = environmentTarget.texture;
-  scene.environmentIntensity = 0.34;
-  environment.dispose();
-  pmrem.dispose();
+  scene.environment = createStudioEnvironment(renderer);
+  scene.environmentIntensity = 0.55;
+  scene.add(createBackdrop());
 
-  scene.add(new THREE.HemisphereLight('#e8d8d5', '#20111a', 0.85));
-  const key = new THREE.DirectionalLight('#ffe2cf', 2.8);
-  key.position.set(-3.2, 5, 4);
+  // A front key models the cup with shadow; a strong backlight carries light
+  // through the thin petals; a faint fill keeps the shadow side readable.
+  const key = new THREE.DirectionalLight('#fff1e2', 2.4);
+  key.position.set(-3.2, 4.2, 2.6);
   key.castShadow = true;
   key.shadow.mapSize.setScalar(mobile ? 1024 : 2048);
-  Object.assign(key.shadow.camera, { left: -2.7, right: 2.7, top: 3, bottom: -3, near: 0.5, far: 14 });
-  key.shadow.normalBias = 0.015;
-  key.shadow.bias = -0.00015;
-  key.shadow.radius = 3;
+  Object.assign(key.shadow.camera, { left: -2.6, right: 2.6, top: 2.8, bottom: -3.2, near: 0.5, far: 16 });
+  key.shadow.normalBias = 0.02;
+  key.shadow.bias = -0.0002;
+  key.shadow.radius = 4;
   scene.add(key);
-  const fill = new THREE.DirectionalLight('#f8b2bc', 0.8);
-  fill.position.set(3, 1.5, 2);
+  const fill = new THREE.DirectionalLight('#f0d8dc', 0.35);
+  fill.position.set(4, 0.5, 3);
   scene.add(fill);
-  const rim = new THREE.DirectionalLight('#ffbe98', 2.4);
-  rim.position.set(1.5, 3.5, -3.5);
-  scene.add(rim);
-  const lowerFill = new THREE.DirectionalLight('#b3c697', 0.6);
-  lowerFill.position.set(-1, -1, 3);
-  scene.add(lowerFill);
+  const back = new THREE.DirectionalLight('#ffdcc0', 3.0);
+  back.position.set(1.6, 2.8, -4.2);
+  scene.add(back);
 
   const rose = createRose({ ...ROSE_CONFIG, mobile });
   scene.add(rose);
-  const ring = createDedicationRing(DEDICATION, renderer);
+  const ring = await createDedicationRing(DEDICATION, renderer);
   scene.add(ring);
+  const post = createPost(renderer, scene, camera, { mobile });
 
-  let wantsRotation = ROSE_CONFIG.autoRotate && !reducedMotion.matches;
+  const motionAllowed = () => !reducedMotion.matches;
+  let wantsRotation = ROSE_CONFIG.autoRotate && motionAllowed();
   let interacting = false;
   let resumeRotationAt = 0;
   let fittedDistance = 9;
@@ -85,7 +84,7 @@ async function start() {
     controls.autoRotate = wantsRotation && !interacting && time >= resumeRotationAt;
   }
   function defaultPosition() {
-    return new THREE.Vector3(0, Math.sin(0.50) * fittedDistance - 0.13, Math.cos(0.50) * fittedDistance);
+    return new THREE.Vector3(0, Math.sin(0.55) * fittedDistance + controls.target.y, Math.cos(0.55) * fittedDistance);
   }
   function resize() {
     const { width, height } = container.getBoundingClientRect();
@@ -93,13 +92,14 @@ async function start() {
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
     const halfFov = THREE.MathUtils.degToRad(camera.fov / 2);
-    fittedDistance = Math.max(2.38 / Math.tan(halfFov), 2.04 / (Math.tan(halfFov) * camera.aspect));
+    fittedDistance = Math.max(2.25 / Math.tan(halfFov), 2.05 / (Math.tan(halfFov) * camera.aspect));
     if (oldFit === null) camera.position.copy(defaultPosition());
     else camera.position.sub(controls.target).multiplyScalar(fittedDistance / oldFit).add(controls.target);
     oldFit = fittedDistance;
-    controls.minDistance = fittedDistance * 0.57;
-    controls.maxDistance = fittedDistance * 1.55;
+    controls.minDistance = fittedDistance * 0.5;
+    controls.maxDistance = fittedDistance * 1.5;
     renderer.setSize(width, height);
+    post.setSize(width, height);
     needsRender = true;
     controls.update();
   }
@@ -114,14 +114,12 @@ async function start() {
   }
   function finishInteraction() {
     interacting = false;
-    // Give the user time to read before smoothly continuing the automatic orbit.
     resumeRotationAt = performance.now() + 2500;
     syncRotation();
   }
   controls.addEventListener('start', pauseForInteraction);
   controls.addEventListener('end', finishInteraction);
 
-  // Equivalent controls for keyboard and switch-device users.
   container.addEventListener('keydown', event => {
     if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', '+', '=', '-', ' '].includes(event.key)) return;
     event.preventDefault();
@@ -147,9 +145,24 @@ async function start() {
     controls.update();
     finishInteraction();
   });
-  const motionChange = () => { if (reducedMotion.matches) { wantsRotation = false; syncRotation(); } };
-  reducedMotion.addEventListener('change', motionChange);
+  reducedMotion.addEventListener('change', () => {
+    if (reducedMotion.matches) { wantsRotation = false; syncRotation(); }
+    rose.userData.uniforms.uSwayAmp.value = motionAllowed() ? 0.012 : 0;
+    needsRender = true;
+  });
+  rose.userData.uniforms.uSwayAmp.value = motionAllowed() ? 0.012 : 0;
 
+  const flowerWorld = new THREE.Vector3();
+  const ringNear = new THREE.Vector3();
+  const towardsCamera = new THREE.Vector3();
+  function focusDistance() {
+    // Keep the engraving crisp: focus between the near edge of the band and the flower.
+    rose.userData.flower.getWorldPosition(flowerWorld);
+    ring.getWorldPosition(ringNear);
+    towardsCamera.set(camera.position.x - ringNear.x, 0, camera.position.z - ringNear.z).normalize();
+    ringNear.addScaledVector(towardsCamera, ring.userData.radius);
+    return THREE.MathUtils.lerp(camera.position.distanceTo(ringNear), camera.position.distanceTo(flowerWorld), 0.4);
+  }
   let previousTime = 0;
   let visible = true;
   let drawnFrames = 0;
@@ -158,15 +171,20 @@ async function start() {
     if (!visible) return;
     const dt = previousTime ? Math.min((time - previousTime) / 1000, 0.05) : 0;
     previousTime = time;
+    const seconds = time / 1000;
     syncRotation(time);
     const cameraChanged = controls.update(dt);
-    if (!cameraChanged && !controls.autoRotate && !needsRender) return;
-    renderer.render(scene, camera);
+    // With motion allowed the petals breathe every frame; otherwise render on demand.
+    if (!motionAllowed() && !cameraChanged && !controls.autoRotate && !needsRender) return;
+    rose.userData.animate(motionAllowed() ? seconds : 0, camera, back);
+    post.update(seconds, focusDistance());
+    post.render(dt);
     needsRender = false;
-    // Measure after warmup; a slow phone gets a lower render resolution.
     if (drawnFrames > 30 && drawnFrames < 91) frameTotal += dt;
     if (drawnFrames === 91 && frameTotal / 60 > 0.027) {
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.15));
+      post.degrade();
+      resize();
     }
     drawnFrames++;
   }
@@ -190,14 +208,13 @@ async function start() {
     document.body.classList.add('is-loaded');
     status.textContent = '';
   });
-  // Compile before the fade-in so the first visible frame is complete.
   await renderer.compileAsync(scene, camera);
-  renderer.render(scene, camera);
+  render(performance.now());
   document.body.classList.add('is-loaded');
   status.textContent = '';
 
   if (import.meta.env.DEV) {
-    window.__rose = { renderer, scene, camera, controls, ring, rose };
+    window.__rose = { renderer, scene, camera, controls, ring, rose, key, fill, back, post, THREE };
   }
 }
 
