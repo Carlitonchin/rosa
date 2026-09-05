@@ -7,7 +7,7 @@
 }
 
 :root {
-  background: #120a0d;
+  background: #241619;
   color-scheme: dark;
 }
 
@@ -19,7 +19,7 @@ html, body {
   margin: 0;
   overflow: hidden;
   overscroll-behavior: none;
-  background: #120a0d;
+  background: #241619;
 }
 
 #scene {

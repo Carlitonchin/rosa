@@ -4,7 +4,7 @@ import * as THREE from 'three';
 // outer face and darkened the way a jeweller fills lettering so it stays legible.
 
 const RADIUS = 1.52;
-const BAND_HEIGHT = 0.34;
+const BAND_HEIGHT = 0.38;
 const BAND_THICKNESS = 0.058;
 const FONT_FAMILY = '"Cormorant Garamond", "Cormorant", Georgia, "Times New Roman", serif';
 
@@ -102,9 +102,14 @@ export async function createDedicationRing(message, renderer) {
     ctx.save();
     ctx.font = font(fontSize);
     ctx.fillStyle = fill;
+    ctx.strokeStyle = fill;
+    ctx.lineWidth = fontSize * 0.035;
+    ctx.lineJoin = 'round';
     ctx.textBaseline = 'middle';
     ctx.letterSpacing = `${spacing}px`;
     if (blur) ctx.filter = `blur(${blur}px)`;
+    // A thin stroke thickens the hairlines so the engraving holds up at a distance.
+    ctx.strokeText(text, startX, bandCentre + fontSize * 0.04);
     ctx.fillText(text, startX, bandCentre + fontSize * 0.04);
     ctx.restore();
   }

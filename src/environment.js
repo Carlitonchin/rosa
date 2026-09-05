@@ -63,9 +63,9 @@ export function createBackdrop() {
     side: THREE.BackSide,
     depthWrite: false,
     uniforms: {
-      pool: { value: new THREE.Color('#37242a') },
-      edge: { value: new THREE.Color('#100a0c') },
-      floor: { value: new THREE.Color('#0a0507') },
+      pool: { value: new THREE.Color('#5a3c45') },
+      edge: { value: new THREE.Color('#241619') },
+      floor: { value: new THREE.Color('#170d10') },
     },
     vertexShader: `
       varying vec3 vView;
@@ -83,7 +83,7 @@ export function createBackdrop() {
         // behind the flower however the camera orbits.
         vec2 screen = dir.z < -0.05 ? dir.xy / -dir.z : dir.xy * 20.0;
         float d = length((screen - vec2(0.0, 0.16)) * vec2(1.0, 1.25));
-        float glow = exp(-d * d * 3.2);
+        float glow = exp(-d * d * 2.4);
         vec3 color = mix(edge, pool, glow);
         color = mix(color, floor, smoothstep(0.05, -0.6, dir.y) * 0.6);
         gl_FragColor = vec4(color, 1.0);

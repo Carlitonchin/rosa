@@ -13,7 +13,7 @@ const FilmShader = {
     tDiffuse: { value: null },
     uTime: { value: 0 },
     uGrain: { value: 0.045 },
-    uVignette: { value: 0.55 },
+    uVignette: { value: 0.38 },
     uAberration: { value: 0.0025 },
     uResolution: { value: new THREE.Vector2(1, 1) },
   },
@@ -72,7 +72,7 @@ export function createPost(renderer, scene, camera, { mobile }) {
     gtao.normalMaterial.side = THREE.DoubleSide;
     gtao.blendIntensity = 0.9;
     composer.addPass(gtao);
-    bokeh = new BokehPass(scene, camera, { focus: 9, aperture: 0.0011, maxblur: 0.0035 });
+    bokeh = new BokehPass(scene, camera, { focus: 9, aperture: 0.001, maxblur: 0.0025 });
     const depthMaterial = bokeh._materialDepth ?? bokeh.materialDepth;
     if (depthMaterial) depthMaterial.side = THREE.DoubleSide;
     composer.addPass(bokeh);

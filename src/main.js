@@ -18,10 +18,10 @@ async function start() {
     || (viewport.width || window.innerWidth || 1024) <= 760;
   const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: false, powerPreference: 'high-performance' });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, mobile ? 1.65 : 2));
-  renderer.setClearColor('#120a0d', 1);
+  renderer.setClearColor('#241619', 1);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 0.96;
+  renderer.toneMappingExposure = 1.08;
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFShadowMap;
   renderer.shadowMap.autoUpdate = !mobile;
@@ -45,7 +45,7 @@ async function start() {
   controls.autoRotateSpeed = ROSE_CONFIG.rotationSpeed;
 
   scene.environment = createStudioEnvironment(renderer);
-  scene.environmentIntensity = 0.55;
+  scene.environmentIntensity = 0.72;
   scene.add(createBackdrop());
 
   // A front key models the cup with shadow; a strong backlight carries light
@@ -59,7 +59,7 @@ async function start() {
   key.shadow.bias = -0.0002;
   key.shadow.radius = 4;
   scene.add(key);
-  const fill = new THREE.DirectionalLight('#f0d8dc', 0.35);
+  const fill = new THREE.DirectionalLight('#f0d8dc', 0.7);
   fill.position.set(4, 0.5, 3);
   scene.add(fill);
   const back = new THREE.DirectionalLight('#ffdcc0', 3.0);
@@ -161,7 +161,7 @@ async function start() {
     ring.getWorldPosition(ringNear);
     towardsCamera.set(camera.position.x - ringNear.x, 0, camera.position.z - ringNear.z).normalize();
     ringNear.addScaledVector(towardsCamera, ring.userData.radius);
-    return THREE.MathUtils.lerp(camera.position.distanceTo(ringNear), camera.position.distanceTo(flowerWorld), 0.4);
+    return THREE.MathUtils.lerp(camera.position.distanceTo(ringNear), camera.position.distanceTo(flowerWorld), 0.25);
   }
   let previousTime = 0;
   let visible = true;
