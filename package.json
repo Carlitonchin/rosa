@@ -1,0 +1,20 @@
+{
+  "name": "rosa",
+  "version": "1.0.0",
+  "description": "Una rosa en tres dimensiones y una dedicatoria que la envuelve.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "three": "^0.185.1"
+  },
+  "devDependencies": {
+    "vite": "^8.2.2"
+  }
+}
