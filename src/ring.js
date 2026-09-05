@@ -69,7 +69,7 @@ export async function createDedicationRing(message, renderer) {
 
   const circumference = Math.PI * 2 * RADIUS;
   const maxSize = renderer.capabilities.maxTextureSize;
-  const width = Math.min(maxSize, 8192);
+  const width = Math.min(maxSize, 6144);
   const height = Math.round(width * total / circumference);
   const bandPx = height * outerSpan;
   const text = message.trim() || 'Siempre, tú.';

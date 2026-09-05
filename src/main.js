@@ -17,14 +17,15 @@ async function start() {
   const mobile = window.matchMedia('(pointer: coarse)').matches
     || (viewport.width || window.innerWidth || 1024) <= 760;
   const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: false, powerPreference: 'high-performance' });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, mobile ? 1.65 : 2));
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
   renderer.setClearColor('#241619', 1);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.08;
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFShadowMap;
-  renderer.shadowMap.autoUpdate = !mobile;
+  // Shadows refresh every other frame: the petal sway is far too small to notice the lag.
+  renderer.shadowMap.autoUpdate = false;
   renderer.shadowMap.needsUpdate = true;
   container.appendChild(renderer.domElement);
   renderer.domElement.setAttribute('aria-hidden', 'true');
@@ -177,6 +178,7 @@ async function start() {
     // With motion allowed the petals breathe every frame; otherwise render on demand.
     if (!motionAllowed() && !cameraChanged && !controls.autoRotate && !needsRender) return;
     rose.userData.animate(motionAllowed() ? seconds : 0, camera, back);
+    if (!mobile && drawnFrames % 2 === 0) renderer.shadowMap.needsUpdate = true;
     post.update(seconds, focusDistance());
     post.render(dt);
     needsRender = false;

@@ -65,10 +65,12 @@ export function createPost(renderer, scene, camera, { mobile }) {
   let gtao = null;
   if (!mobile) {
     // Contact shading between overlapping petals: this is what makes the cup read as depth.
+    // Computed at half resolution and blended over the full-res image: a quarter of
+    // the cost, and the soft contact shading looks the same.
     gtao = new GTAOPass(scene, camera, size.x, size.y, {}, {
-      radius: 0.22, distanceExponent: 1.5, thickness: 0.6, scale: 1.6, samples: 12,
+      radius: 0.22, distanceExponent: 1.5, thickness: 0.6, scale: 1.6, samples: 8,
       distanceFallOff: 1, screenSpaceRadius: false,
-    }, { lumaPhi: 10, depthPhi: 2, normalPhi: 3, radius: 6, radiusExponent: 1, rings: 3, samples: 12 });
+    }, { lumaPhi: 10, depthPhi: 2, normalPhi: 3, radius: 4, radiusExponent: 1, rings: 2, samples: 8 });
     gtao.normalMaterial.side = THREE.DoubleSide;
     gtao.blendIntensity = 0.9;
     composer.addPass(gtao);
@@ -89,6 +91,7 @@ export function createPost(renderer, scene, camera, { mobile }) {
       composer.setSize(width, height);
       const drawing = renderer.getDrawingBufferSize(new THREE.Vector2());
       film.uniforms.uResolution.value.copy(drawing);
+      if (gtao) gtao.setSize(Math.max(1, Math.round(drawing.x / 2)), Math.max(1, Math.round(drawing.y / 2)));
     },
     degrade() {
       if (gtao) gtao.enabled = false;

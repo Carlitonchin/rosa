@@ -180,7 +180,7 @@ export function createRose({ petalColor, mobile }) {
   flower.scale.setScalar(1.25);
   rose.add(flower);
 
-  const petalTextures = createPetalTextures(mobile ? 512 : 1024);
+  const petalTextures = createPetalTextures(mobile ? 512 : 768);
   const leafTextures = createLeafTextures(mobile ? 512 : 768);
   const stemTextures = createStemTextures();
 
